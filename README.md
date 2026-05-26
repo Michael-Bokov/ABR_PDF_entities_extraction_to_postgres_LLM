@@ -7,7 +7,7 @@
 
 Данные сохраняются в PostgreSQL со связью с документом; выборка по **названию документа** (`title` = имя файла без расширения).
 
-## Архитектура (рекомендуется для 11 GB VRAM)
+## Архитектура
 
 ```
 PDF → PaddleOCR (CPU) → текст по страницам → Ollama (GPU) → JSON → PostgreSQL
@@ -19,7 +19,6 @@ PDF → PaddleOCR (CPU) → текст по страницам → Ollama (GPU) 
 | **ollama** | Квантованная LLM на GPU (llama3.1:8b и др.) |
 | **postgres** | Хранение |
 
-Старый режим `EXTRACTOR=rules` (regex + эвристики) оставлен для сравнения.
 
 ## Быстрый старт
 
@@ -33,12 +32,6 @@ docker compose exec ollama ollama pull llama3.1:8b
 docker compose exec worker python -m abr_import check
 ```
 
-3. Тест одного файла (44 стр. ≈ 11 запросов к LLM):
-
-```bash
-docker compose exec worker python -m abr_import test-pdf "/data/input/ГОСТ 16436-70_image.pdf"
-```
-
 3. Логи воркера:
 
 ```bash
@@ -50,9 +43,6 @@ docker compose logs -f worker
 ```bash
 docker compose exec worker python -m abr_import query "Имя_документа"
 ```
-
-Или SQL — см. `sql/queries.sql`.
-
 ## Схема БД
 
 - `documents` — метаданные, `file_hash` (идемпотентность), `status`, `title`
@@ -79,63 +69,6 @@ docker compose exec worker python -m abr_import query "Имя_документа
 | `PDF_DPI` | Качество рендера (200 по умолчанию) |
 | `STALE_PROCESSING_MINUTES` | Таймаут зависшей обработки |
 
-## Локальная разработка (без Docker)
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements-cpu.txt
-pip install -e .
-
-# PostgreSQL должен быть запущен, схема: sql/init.sql
-set DATABASE_URL=postgresql://abr:abr@localhost:5432/abr_import
-python -m abr_import worker
-```
-
-## Ошибка `No module named 'paddle'` и пустые таблицы
-
-**Симптом:** в `processing_log` ошибки paddle, в БД `completed`, но `abbreviations` / `terms` пустые (0, 0).
-
-**Причина:** PaddleOCR не запускался (модуль `paddle` не виден в контейнере). Раньше образ собирался с `|| true` и ошибка проглатывалась при сборке.
-
-**Что сделать:**
-
-```bash
-docker compose stop worker
-docker compose build --no-cache worker
-docker compose up -d worker
-# check только с GPU (при build GPU нет — это нормально):
-docker compose run --rm worker python -m abr_import check
-```
-
-`check` должен вывести `OK: paddle ...` и `OK: PaddleOCR ...`.
-
-**Сборка падает с `libcuda.so.1`?** При `docker build` видеокарты нет — не добавляйте `import paddle` в `RUN` в Dockerfile. Проверка paddle — только в запущенном контейнере (`check` выше). Нужны [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) и `deploy.reservations.devices` в compose.
-
-Повторная обработка документов с пустыми таблицами:
-
-```bash
-docker compose exec postgres psql -U abr -d abr_import -c \
-  "UPDATE documents SET status='pending', error_message=NULL, processed_at=NULL WHERE status='completed' AND id NOT IN (SELECT DISTINCT document_id FROM abbreviations UNION SELECT DISTINCT document_id FROM terms);"
-```
-
-Верните PDF из `data/archive/` в `data/input/` перед повторным запуском.
-
-## Кракозябры в именах PDF после распаковки ZIP
-
-**Причина:** архив создан в Windows без флага UTF-8; имена внутри ZIP в CP866 или CP1251, а распаковщик читает их иначе.
-
-**Решение:** задайте кодировку и распакуйте заново:
-
-```env
-ZIP_FILENAME_ENCODING=cp866
-```
-
-Если не помогло — попробуйте `cp1251`. В `docker-compose.yml` переменная уже добавлена; после смены пересоберите воркер:
-
-```bash
-docker compose up -d --build worker
-```
 
 ### Повторный импорт тех же документов
 
@@ -160,17 +93,9 @@ docker compose up -d --build worker
 
    (или снова положите исходный `.zip` в `data/input/`)
 
-5. Очистите **битые записи в БД** (иначе останутся старые `title`/`filename`):
-
-   ```bash
-   docker compose exec postgres psql -U abr -d abr_import -c "TRUNCATE documents RESTART IDENTITY CASCADE;"
-   ```
-
-   Выборочное удаление — см. `sql/reset_for_reimport.sql`.
-
+5. Очистите записи в БД (иначе останутся старые `title`/`filename`):
+   
 6. Запустите снова: `docker compose start worker`
-
-ZIP распакуется заново с правильной кодировкой; документы зарегистрируются с нормальными русскими именами.
 
 ## Модели на 2080 Ti 11 GB
 
@@ -179,17 +104,12 @@ ZIP распакуется заново с правильной кодировк
 | **llama3.1:8b** (по умолчанию) | ~5–6 GB | `ollama pull llama3.1:8b` |
 | **qwen2.5:14b-instruct-q4_K_M** | ~9 GB | `ollama pull qwen2.5:14b-instruct-q4_K_M` + `OLLAMA_MODEL=...` |
 
-У Llama 3.2 **нет** текстовой 14B — есть 1B/3B. Для «крупнее» на 11 GB берите Qwen2.5 14B Q4, не llama3.2.
-
-**vLLM:** возможен отдельным сервисом; сейчас реализован **Ollama** (проще в Docker). API совместимо по смыслу (HTTP generate).
-
-Документ 44 стр. → чанки по `LLM_CHUNK_PAGES=4` → ~11 вызовов LLM на документ.
 
 ## Переменные
 
 | Переменная | Описание |
 |------------|----------|
-| `USE_GPU` | `false` — OCR на CPU (рекомендуется) |
+| `USE_GPU` | `false` — OCR на CPU |
 | `EXTRACTOR` | `llm` или `rules` |
 | `OLLAMA_URL` | `http://ollama:11434` |
 | `OLLAMA_MODEL` | имя модели в Ollama |
