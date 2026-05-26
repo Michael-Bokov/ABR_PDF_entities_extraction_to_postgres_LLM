@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "abr-import"
+version = "1.0.0"
+description = "Импорт сокращений и терминов из сканов PDF в PostgreSQL"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "sqlalchemy>=2.0,<3",
+    "psycopg2-binary>=2.9,<3",
+    "PyMuPDF>=1.24,<2",
+    "numpy>=1.26,<3",
+    "Pillow>=10.0,<12",
+    "paddleocr>=2.7,<3",
+]
+
+[project.scripts]
+abr-import = "abr_import.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

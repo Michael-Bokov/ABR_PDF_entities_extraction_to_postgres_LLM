@@ -1,0 +1,97 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: abr
+      POSTGRES_PASSWORD: abr
+      POSTGRES_DB: abr_import
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U abr -d abr_import"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # LLM на GPU (2080 Ti 11GB: llama3.1:8b или qwen2.5:14b-instruct-q4_K_M)
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # OCR на CPU — вся VRAM для Ollama
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    environment:
+      DATABASE_URL: postgresql://abr:abr@postgres:5432/abr_import
+      INPUT_DIR: /data/input
+      ARCHIVE_DIR: /data/archive
+      USE_GPU: "false"
+      OCR_LANG: ru
+      PDF_DPI: "200"
+      EXTRACTOR: llm
+      OLLAMA_URL: http://ollama:11434
+      # 8b — стабильно на 11GB; 14b: qwen2.5:14b-instruct-q4_K_M (попробовать)
+      OLLAMA_MODEL: llama3.1:8b
+      LLM_CHUNK_PAGES: "4"
+      LLM_MAX_CHARS: "12000"
+      LLM_TIMEOUT_SEC: "600"
+      STALE_PROCESSING_MINUTES: "120"
+      POLL_INTERVAL_SEC: "10"
+      ZIP_FILENAME_ENCODING: auto
+      ZIP_FORCE_REEXTRACT: "false"
+    volumes:
+      - ./data/input:/data/input
+      - ./data/archive:/data/archive
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+
+  # Старый GPU-OCR воркер (опционально)
+  worker-gpu-ocr:
+    profiles: ["gpu-ocr"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://abr:abr@postgres:5432/abr_import
+      INPUT_DIR: /data/input
+      ARCHIVE_DIR: /data/archive
+      USE_GPU: "true"
+      EXTRACTOR: rules
+    volumes:
+      - ./data/input:/data/input
+      - ./data/archive:/data/archive
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  ollama_data:
